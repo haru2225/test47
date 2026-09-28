@@ -1,0 +1,115 @@
+#!/bin/bash
+# Clone haru2225/test47 and digital-synthesis-lab/DM2 side by side, then submit from test47/:
+#   qsub -P <ProjectGroup_ID> run_test47.pbs
+# If DM2 is elsewhere, pass DM2_ROOT with -v. The crystal data is bundled (data/).
+# Replace projectname below with the ProjectGroup ID shown by `listu`, or use
+# the command-line -P option above (qsub options override #PBS directives).
+#PBS -q sg8
+#PBS -P projectname
+#PBS -N test47_crystal
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mpiprocs=1:ompthreads=8:mem=32gb:ngpus=1
+#PBS -j oe
+
+set -eu
+
+cd "$PBS_O_WORKDIR"
+
+. /etc/profile.d/modules.sh
+module purge
+module load cuda/12.4
+
+DM2_ROOT="${DM2_ROOT:-$PBS_O_WORKDIR/../DM2}"
+SIF_IMAGE="${SIF_IMAGE:-$PBS_O_WORKDIR/test47-pytorch-2.5.0-cu124.sif}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PBS_O_WORKDIR/test47-output}"
+
+# test47.py trains from scratch if no checkpoint exists yet, then generates and exports CG data.
+CRYSTAL_DATA_PATH="${CRYSTAL_DATA_PATH:-$PBS_O_WORKDIR/data/silica_beta_cristobalite_init.data}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-$PBS_O_WORKDIR/checkpoints/test47_sio2_crystal_2x2x2_nequip.pt}"
+NUM_UPDATES="${NUM_UPDATES:-30000}"
+DUPLICATE="${DUPLICATE:-128}"
+INIT="${INIT:-crystal}"                    # test47: crystal (default, matches test46) or random
+SINGLE_REFERENCE="${SINGLE_REFERENCE:-0}"  # test47: 1 to fall back to test46's single-structure training
+BATCH_SIZE="${BATCH_SIZE:-16}"
+CUTOFF="${CUTOFF:-5.0}"
+# Only edges <= CUTOFF survive DownselectEdges after rattle, so LARGE_CUTOFF just needs a margin
+# over CUTOFF for the training sigma_max (default 0.75 A); the DM2 default (10.0, tuned for a
+# ~36 A glass box) is far denser than needed here and can cause CUDA OOM (see module docstring's
+# cell-replication note for why the box size matters). Lower it (e.g. 7.25) or BATCH_SIZE on OOM.
+LARGE_CUTOFF="${LARGE_CUTOFF:-5.0}"
+# If CUDA OOM persists at BATCH_SIZE=1, the l<=3 e3nn tensor products themselves (not the graph
+# size) are likely the cause -- shrink the l=2/l=3 channel counts here rather than the graph.
+IRREPS_HIDDEN="${IRREPS_HIDDEN:-64x0e + 32x1e + 16x2e + 8x3e}"
+IRREPS_EDGE="${IRREPS_EDGE:-4x0e + 4x1e + 2x2e + 2x3e}"
+NUM_CONVS="${NUM_CONVS:-3}"
+GEN_NOISY_STEPS="${GEN_NOISY_STEPS:-2900}"
+GEN_POLISH_STEPS="${GEN_POLISH_STEPS:-100}"
+GEN_CHECKPOINT_STEPS="${GEN_CHECKPOINT_STEPS:-100}"
+TRAINING_CHECKPOINT_EPOCHS="${TRAINING_CHECKPOINT_EPOCHS:-5}"
+TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-11.5}"
+JOB_NCPUS="${PBS_NCPUS:-8}"
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "ERROR: Singularity image is not readable: $SIF_IMAGE" >&2
+    echo "Build it first with:" >&2
+    echo "  singularity build $SIF_IMAGE Singularity.test47.def" >&2
+    exit 1
+fi
+
+if [ ! -d "$DM2_ROOT/src/graphite" ]; then
+    echo "ERROR: DM2 source tree is not readable: $DM2_ROOT" >&2
+    echo "Clone https://github.com/digital-synthesis-lab/DM2 next to test47, or set DM2_ROOT with qsub -v." >&2
+    exit 1
+fi
+DM2_ROOT="$(cd "$DM2_ROOT" && pwd)"
+
+if [ ! -r "$CRYSTAL_DATA_PATH" ]; then
+    echo "ERROR: crystal reference structure is not readable: $CRYSTAL_DATA_PATH" >&2
+    echo "Set CRYSTAL_DATA_PATH with qsub -v." >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR" "$(dirname "$CHECKPOINT_PATH")"
+
+export SINGULARITYENV_DM2_ROOT="$DM2_ROOT"
+export SINGULARITYENV_PYTHONPATH="$DM2_ROOT/src"
+export SINGULARITYENV_MPLBACKEND=Agg
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_PYTHONNOUSERSITE=1
+export SINGULARITYENV_OMP_NUM_THREADS="$JOB_NCPUS"
+
+echo "Starting test47 on $(hostname) at $(date)"
+echo "DM2_ROOT=$DM2_ROOT"
+echo "CRYSTAL_DATA_PATH=$CRYSTAL_DATA_PATH"
+echo "CHECKPOINT_PATH=$CHECKPOINT_PATH"
+echo "OUTPUT_DIR=$OUTPUT_DIR"
+echo "NUM_UPDATES=$NUM_UPDATES  DUPLICATE=$DUPLICATE  BATCH_SIZE=$BATCH_SIZE  CUTOFF=$CUTOFF  LARGE_CUTOFF=$LARGE_CUTOFF  INIT=$INIT  SINGLE_REFERENCE=$SINGLE_REFERENCE"
+echo "GEN_STEPS=$GEN_NOISY_STEPS+$GEN_POLISH_STEPS"
+
+singularity exec --nv \
+    --bind "$DM2_ROOT:$DM2_ROOT" \
+    --bind "$(dirname "$CRYSTAL_DATA_PATH"):$(dirname "$CRYSTAL_DATA_PATH")" \
+    --bind "$(dirname "$CHECKPOINT_PATH"):$(dirname "$CHECKPOINT_PATH")" \
+    --pwd "$PBS_O_WORKDIR" \
+    "$SIF_IMAGE" \
+    python -u "$PBS_O_WORKDIR/test47.py" \
+        --crystal-data "$CRYSTAL_DATA_PATH" \
+        --checkpoint "$CHECKPOINT_PATH" \
+        --output-dir "$OUTPUT_DIR" \
+        --num-updates "$NUM_UPDATES" \
+        --duplicate "$DUPLICATE" \
+        --init "$INIT" \
+        $( [[ "$SINGLE_REFERENCE" == 1 ]] && echo --single-reference ) \
+        --batch-size "$BATCH_SIZE" \
+        --cutoff "$CUTOFF" \
+        --large-cutoff "$LARGE_CUTOFF" \
+        --irreps-hidden "$IRREPS_HIDDEN" \
+        --irreps-edge "$IRREPS_EDGE" \
+        --num-convs "$NUM_CONVS" \
+        --gen-noisy-steps "$GEN_NOISY_STEPS" \
+        --gen-polish-steps "$GEN_POLISH_STEPS" \
+        --generation-checkpoint-steps "$GEN_CHECKPOINT_STEPS" \
+        --training-checkpoint-epochs "$TRAINING_CHECKPOINT_EPOCHS" \
+        --time-budget-hours "$TIME_BUDGET_HOURS"
+
+echo "Finished test47 at $(date)"

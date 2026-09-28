@@ -1,0 +1,19 @@
+{
+  "format": "test47-reference-frames-v1",
+  "frames": 18,
+  "atoms": 192,
+  "source": "beta-cristobalite NPT MD (md/traj_0.lammpstrj, md/traj_1.lammpstrj), index 2000::1000 each",
+  "sources": [
+    {
+      "name": "traj_0.lammpstrj",
+      "sha256": "c1f529d0cd5deaf4addc950696736dce190acc691cdf031b392fbb4da425c6aa",
+      "index": "2000::1000"
+    },
+    {
+      "name": "traj_1.lammpstrj",
+      "sha256": "dcf62875a38ebda00d0d7ce0ccce6e6be26af03d2d1639119480658cb38dee5a",
+      "index": "2000::1000"
+    }
+  ],
+  "units": "Angstrom"
+}

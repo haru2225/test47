@@ -1,0 +1,6 @@
+__pycache__/
+checkpoints/
+figures/
+results/
+*.pt
+*.o[0-9]*
