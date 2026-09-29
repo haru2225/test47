@@ -1,6 +1,7 @@
 #!/bin/bash
 # Clone haru2225/test47 and digital-synthesis-lab/DM2 side by side, then submit from test47/:
-#   qsub -P <ProjectGroup_ID> run_test47.pbs
+#   qsub -P <ProjectGroup_ID> run_test47.pbs                              # STAGE=train-and-generate (default)
+#   qsub -P <ProjectGroup_ID> -v STAGE=generate-v2 run_test47.pbs         # corrected sampler, needs an existing checkpoint
 # If DM2 is elsewhere, pass DM2_ROOT with -v. The crystal data is bundled (data/).
 # Replace projectname below with the ProjectGroup ID shown by `listu`, or use
 # the command-line -P option above (qsub options override #PBS directives).
@@ -19,9 +20,15 @@ cd "$PBS_O_WORKDIR"
 module purge
 module load cuda/12.4
 
+STAGE="${STAGE:-train-and-generate}"  # or: generate-v2 (corrected sampler; see generate-v2.py)
 DM2_ROOT="${DM2_ROOT:-$PBS_O_WORKDIR/../DM2}"
 SIF_IMAGE="${SIF_IMAGE:-$PBS_O_WORKDIR/test47-pytorch-2.5.0-cu124.sif}"
 OUTPUT_DIR="${OUTPUT_DIR:-$PBS_O_WORKDIR/test47-output}"
+GENERATE_V2_OUTPUT_DIR="${GENERATE_V2_OUTPUT_DIR:-$PBS_O_WORKDIR/generate-v2-output}"
+STEPS="${STEPS:-2900}"            # generate-v2.py: annealing steps (sigma-max -> sigma-min)
+POLISH_STEPS="${POLISH_STEPS:-100}"
+SIGMA_MAX="${SIGMA_MAX:-0.75}"     # generate-v2.py: do not exceed training's own sigma-max
+SIGMA_MIN="${SIGMA_MIN:-0.03}"
 
 # test47.py trains from scratch if no checkpoint exists yet, then generates and exports CG data.
 CRYSTAL_DATA_PATH="${CRYSTAL_DATA_PATH:-$PBS_O_WORKDIR/data/silica_beta_cristobalite_init.data}"
@@ -78,38 +85,65 @@ export SINGULARITYENV_PYTHONUNBUFFERED=1
 export SINGULARITYENV_PYTHONNOUSERSITE=1
 export SINGULARITYENV_OMP_NUM_THREADS="$JOB_NCPUS"
 
-echo "Starting test47 on $(hostname) at $(date)"
+echo "Starting test47 (STAGE=$STAGE) on $(hostname) at $(date)"
 echo "DM2_ROOT=$DM2_ROOT"
 echo "CRYSTAL_DATA_PATH=$CRYSTAL_DATA_PATH"
 echo "CHECKPOINT_PATH=$CHECKPOINT_PATH"
-echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "NUM_UPDATES=$NUM_UPDATES  DUPLICATE=$DUPLICATE  BATCH_SIZE=$BATCH_SIZE  CUTOFF=$CUTOFF  LARGE_CUTOFF=$LARGE_CUTOFF  INIT=$INIT  SINGLE_REFERENCE=$SINGLE_REFERENCE"
-echo "GEN_STEPS=$GEN_NOISY_STEPS+$GEN_POLISH_STEPS"
 
-singularity exec --nv \
-    --bind "$DM2_ROOT:$DM2_ROOT" \
-    --bind "$(dirname "$CRYSTAL_DATA_PATH"):$(dirname "$CRYSTAL_DATA_PATH")" \
-    --bind "$(dirname "$CHECKPOINT_PATH"):$(dirname "$CHECKPOINT_PATH")" \
-    --pwd "$PBS_O_WORKDIR" \
-    "$SIF_IMAGE" \
-    python -u "$PBS_O_WORKDIR/test47.py" \
-        --crystal-data "$CRYSTAL_DATA_PATH" \
-        --checkpoint "$CHECKPOINT_PATH" \
-        --output-dir "$OUTPUT_DIR" \
-        --num-updates "$NUM_UPDATES" \
-        --duplicate "$DUPLICATE" \
-        --init "$INIT" \
-        $( [[ "$SINGLE_REFERENCE" == 1 ]] && echo --single-reference ) \
-        --batch-size "$BATCH_SIZE" \
-        --cutoff "$CUTOFF" \
-        --large-cutoff "$LARGE_CUTOFF" \
-        --irreps-hidden "$IRREPS_HIDDEN" \
-        --irreps-edge "$IRREPS_EDGE" \
-        --num-convs "$NUM_CONVS" \
-        --gen-noisy-steps "$GEN_NOISY_STEPS" \
-        --gen-polish-steps "$GEN_POLISH_STEPS" \
-        --generation-checkpoint-steps "$GEN_CHECKPOINT_STEPS" \
-        --training-checkpoint-epochs "$TRAINING_CHECKPOINT_EPOCHS" \
-        --time-budget-hours "$TIME_BUDGET_HOURS"
+bind_args=(--bind "$DM2_ROOT:$DM2_ROOT" --bind "$(dirname "$CRYSTAL_DATA_PATH"):$(dirname "$CRYSTAL_DATA_PATH")" \
+           --bind "$(dirname "$CHECKPOINT_PATH"):$(dirname "$CHECKPOINT_PATH")")
 
-echo "Finished test47 at $(date)"
+case "$STAGE" in
+    train-and-generate)
+        echo "OUTPUT_DIR=$OUTPUT_DIR"
+        echo "GEN_STEPS=$GEN_NOISY_STEPS+$GEN_POLISH_STEPS"
+        mkdir -p "$OUTPUT_DIR"
+        singularity exec --nv "${bind_args[@]}" --bind "$OUTPUT_DIR:$OUTPUT_DIR" --pwd "$PBS_O_WORKDIR" \
+            "$SIF_IMAGE" \
+            python -u "$PBS_O_WORKDIR/test47.py" \
+                --crystal-data "$CRYSTAL_DATA_PATH" \
+                --checkpoint "$CHECKPOINT_PATH" \
+                --output-dir "$OUTPUT_DIR" \
+                --num-updates "$NUM_UPDATES" \
+                --duplicate "$DUPLICATE" \
+                --init "$INIT" \
+                $( [[ "$SINGLE_REFERENCE" == 1 ]] && echo --single-reference ) \
+                --batch-size "$BATCH_SIZE" \
+                --cutoff "$CUTOFF" \
+                --large-cutoff "$LARGE_CUTOFF" \
+                --irreps-hidden "$IRREPS_HIDDEN" \
+                --irreps-edge "$IRREPS_EDGE" \
+                --num-convs "$NUM_CONVS" \
+                --gen-noisy-steps "$GEN_NOISY_STEPS" \
+                --gen-polish-steps "$GEN_POLISH_STEPS" \
+                --generation-checkpoint-steps "$GEN_CHECKPOINT_STEPS" \
+                --training-checkpoint-epochs "$TRAINING_CHECKPOINT_EPOCHS" \
+                --time-budget-hours "$TIME_BUDGET_HOURS"
+        ;;
+    generate-v2)
+        # Requires an existing checkpoint (CHECKPOINT_PATH) from a prior train-and-generate run.
+        [ -r "$CHECKPOINT_PATH" ] || { echo "ERROR: checkpoint not found: $CHECKPOINT_PATH (run STAGE=train-and-generate first)" >&2; exit 1; }
+        echo "GENERATE_V2_OUTPUT_DIR=$GENERATE_V2_OUTPUT_DIR"
+        echo "STEPS=$STEPS+$POLISH_STEPS  SIGMA_MAX=$SIGMA_MAX  SIGMA_MIN=$SIGMA_MIN"
+        mkdir -p "$GENERATE_V2_OUTPUT_DIR"
+        singularity exec --nv "${bind_args[@]}" --bind "$GENERATE_V2_OUTPUT_DIR:$GENERATE_V2_OUTPUT_DIR" --pwd "$PBS_O_WORKDIR" \
+            "$SIF_IMAGE" \
+            python -u "$PBS_O_WORKDIR/generate-v2.py" \
+                --checkpoint "$CHECKPOINT_PATH" \
+                --crystal-data "$CRYSTAL_DATA_PATH" \
+                --cutoff "$CUTOFF" \
+                --irreps-hidden "$IRREPS_HIDDEN" \
+                --irreps-edge "$IRREPS_EDGE" \
+                --num-convs "$NUM_CONVS" \
+                --init "$INIT" \
+                --steps "$STEPS" \
+                --polish-steps "$POLISH_STEPS" \
+                --sigma-max "$SIGMA_MAX" \
+                --sigma-min "$SIGMA_MIN" \
+                --output-dir "$GENERATE_V2_OUTPUT_DIR"
+        ;;
+    *) echo "STAGE must be train-and-generate or generate-v2" >&2; exit 2 ;;
+esac
+
+echo "Finished test47 (STAGE=$STAGE) at $(date)"

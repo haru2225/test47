@@ -95,6 +95,16 @@ python generate-v2.py --checkpoint checkpoints/test47_sio2_crystal_2x2x2_nequip.
 python generate-v2.py --checkpoint checkpoints/test47_sio2_crystal_2x2x2_nequip.pt --init random
 ```
 
+スパコンでは `run_test47.pbs` の `STAGE=generate-v2` から実行できます(既存の checkpoint が必要):
+
+```bash
+qsub -P PROJECT_ID -v STAGE=generate-v2 run_test47.pbs
+qsub -P PROJECT_ID -v STAGE=generate-v2,INIT=random run_test47.pbs
+```
+
+`IRREPS_HIDDEN`/`IRREPS_EDGE`/`NUM_CONVS`/`CUTOFF` は、既定では `train-and-generate` と同じ環境
+変数を共有します。学習時に変えていたら、生成側にも同じ値を渡してください。
+
 `--irreps-hidden`/`--irreps-edge`/`--num-convs`/`--cutoff` must match whatever the checkpoint was
 actually trained with. Output goes to `generate-v2-output/` (`metrics.json` now also reports
 `generated_si_si_min_distance_angstrom` / `generated_o_o_min_distance_angstrom`, which
