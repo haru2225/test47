@@ -71,3 +71,32 @@ qsub -P PROJECT_ID run_test47.pbs
   ```
 
 `DM2` は MIT (Tim Hsu; Digital Synthesis Lab @ UCLA)。
+
+## generate-v2.py — corrected generation (fixes an over-noised, structure-destroying sampler)
+
+`generate.py`'s own generation loop (and DM2's own demo code it ports) adds noise of magnitude
+`sigma` itself at every one of 2900 annealing steps. Summed over the schedule (σ: 1.0 → 0.001),
+that injected noise ALONE has a standard deviation of **~31 Å — more than twice the 13.57 Å unit
+cell** — regardless of how good the model is. Verified on a real, well-converged run (loss ~0.015):
+the generated structure had a mean nearest-neighbor distance of 1.24 Å and a minimum of 0.24 Å
+(atoms on top of each other), with completely flat bond/angle histograms, even with `--init
+crystal`. Training was not the problem; the sampler was.
+
+`generate-v2.py` fixes this with a properly SDE-consistent step (same convention as
+`toy-model/SiO2-CG/test42.py`'s verified VE-SDE reverse update): the per-step noise scales with
+`sqrt(dv)` (dv = σᵢ² − σᵢ₊₁², the *change* in noise level) instead of the raw `σᵢ`, and the
+model's prediction is scaled by `dv/σᵢ²` (derived via Tweedie's formula from this network's own
+`dx`-prediction training objective) rather than subtracted at full strength every step. It also
+uses a geometric σ schedule (not DM2's linear one) and caps `--sigma-max` at training's own 0.75
+(not DM2's generation-time 1.0, which exceeds what the model ever saw).
+
+```bash
+python generate-v2.py --checkpoint checkpoints/test47_sio2_crystal_2x2x2_nequip.pt --init crystal
+python generate-v2.py --checkpoint checkpoints/test47_sio2_crystal_2x2x2_nequip.pt --init random
+```
+
+`--irreps-hidden`/`--irreps-edge`/`--num-convs`/`--cutoff` must match whatever the checkpoint was
+actually trained with. Output goes to `generate-v2-output/` (`metrics.json` now also reports
+`generated_si_si_min_distance_angstrom` / `generated_o_o_min_distance_angstrom`, which
+`generate.py`'s own metrics lack). CPU-verified for correctness (tiny random weights, no crash);
+not yet validated against a real trained checkpoint's actual generation quality.
